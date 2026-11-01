@@ -1,0 +1,94 @@
+services:
+  user-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: user
+    ports: ["5433:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user"]
+      interval: 3s
+      retries: 10
+
+  user:
+    build: { context: ., args: { SERVICE: user } }
+    environment:
+      DATABASE_URL: postgres://user:secret@user-db:5432/user?sslmode=disable
+    ports: ["8081:8080"]
+    depends_on:
+      user-db: { condition: service_healthy }
+
+  order-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: order
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: order
+    ports: ["5434:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U order"]
+      interval: 3s
+      retries: 10
+
+  order:
+    build: { context: ., args: { SERVICE: order } }
+    environment:
+      DATABASE_URL: postgres://order:secret@order-db:5432/order?sslmode=disable
+      USER_SERVICE_URL: http://user:8080
+      KAFKA_BROKERS: kafka:29092
+    ports: ["8082:8080"]
+    depends_on:
+      order-db: { condition: service_healthy }
+      kafka-init: { condition: service_completed_successfully }
+
+  notification:
+    build: { context: ., args: { SERVICE: notification } }
+    environment:
+      KAFKA_BROKERS: kafka:29092
+    depends_on:
+      kafka-init: { condition: service_completed_successfully }
+
+  kafka:
+    image: apache/kafka:4.0.0
+    ports: ["9092:9092"]
+    environment:
+      CLUSTER_ID: 4L6g3nShT-eMCtK--X86sw
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: INTERNAL://:29092,EXTERNAL://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka:29092 > /dev/null 2>&1"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+
+  kafka-init:
+    image: apache/kafka:4.0.0
+    depends_on:
+      kafka: { condition: service_healthy }
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --create --if-not-exists --topic order.created --partitions 3 --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --create --if-not-exists --topic order.created.dlq --partitions 1 --replication-factor 1
+
+  # Opsional: UI di http://localhost:8090 untuk melihat topic, pesan, dan consumer group
+  kafka-ui:
+    image: ghcr.io/kafbat/kafka-ui:latest
+    ports: ["8090:8080"]
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+    depends_on:
+      kafka: { condition: service_healthy }
